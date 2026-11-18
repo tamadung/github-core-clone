@@ -1,20 +1,22 @@
-// The entry <-> env lifecycle, as env/src/wire.ts settles it: bind an ephemeral port, tell the env the
-// port it bound, then poll until the env says the trial is over and exit 0. Keep this file as it is:
-// the suite scores the server app.ts builds, and the lifecycle is the harness's, not the contest's.
+// Entry lifecycle: this process is the bridge between the trial env and the
+// forge server built by app.ts. It carries no git or API logic of its own —
+// it only (1) binds the server to a port the kernel picks, (2) reports that
+// port to the env so the suite can dial it, and (3) waits until the env says
+// the trial is over, then exits 0. The env is in charge throughout: it only
+// starts the suite after /register answers, and it only writes the scored
+// export after this process exits, so this process must never leave early —
+// a failed or slow poll is retried with backoff, for as long as it takes.
 //
-//   1. MAKEFUN_ENV_URL names the env's origin (http://store:8080 in a trial container). Without it
-//      there is nothing to talk to, so the program exits 1 at once.
-//   2. Create the server and listen(0): the kernel picks a free port. Never bind 8080 — the env owns it.
-//   3. POST $MAKEFUN_ENV_URL/register {"port": N}. The env records the address the request came from
-//      plus N as your base URL and dials it from then on. The first register wins; a 409 means another
-//      entry already registered, and this process keeps waiting like any other.
-//   4. GET $MAKEFUN_ENV_URL/done until the body is {"done": true}. The env answers at once ({"done":
-//      false} while the suite runs), so this is a poll, not a long-held request. A failed or slow poll
-//      is retried with a short exponential backoff; the process never exits before the env says done.
-//   5. Close the server and exit 0. The harness then stops the env, which writes the export the scorer
-//      reads.
-//
-// main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
+// Worth knowing before touching this file:
+// - MAKEFUN_ENV_URL is the env's origin (http://store:8080 in a trial pod).
+//   With it unset there is nothing to register with, so exit 1 at once.
+// - listen(0) lets the kernel choose the port. Never bind 8080: the env
+//   owns it.
+// - The first /register wins; a 409 means another entry registered first
+//   and this process simply keeps waiting. 400/405 are contract errors and
+//   end the program.
+// - /done is polled, never held open: it answers {"done": false} while the
+//   suite runs and {"done": true} when the trial is over.
 
 import { createApp } from './app.ts';
 
@@ -23,6 +25,7 @@ if (ENV_URL === '') {
   process.stderr.write('[entry] MAKEFUN_ENV_URL is not set: there is no env to register with\n');
   process.exit(1);
 }
+process.stdout.write(`[entry] env ${ENV_URL}\n`);
 
 /** How long one register or done request may take before it is abandoned and retried. */
 const REQUEST_TIMEOUT_MS = 30_000;
